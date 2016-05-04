@@ -4,7 +4,10 @@
 -export([start/0]).
 
 start() ->
-  {ok, Listen} = gen_tcp:listen(8080, [binary, {packet, line}, {reuseaddr, true}, {active, false}]),
+  spawn(fun() -> listen() end).
+
+listen() ->
+  {ok, Listen} = gen_tcp:listen(8000, [binary, {packet, line}, {reuseaddr, true}, {active, false}]),
   accept(Listen).
 
 accept(Listen) ->
@@ -14,56 +17,41 @@ accept(Listen) ->
 
 handle_conn(Client) ->
   {Service, Name, Version, Thread} = parse_request_line(Client),
-  ContentLength = parse_headers(Client, Service, 0),
-  parse_body(Client, Service, ContentLength, 0),
-  ContentLength2 = parse_headers(Service, Client, 0),
-  parse_body(Service, Client, ContentLength2, 0),
-  elsa_kernel_controller:return_thread(Name, Version, Thread).
+  {_, I ,F} = Thread,
+  elsa_thread_controller:put(Name, Version, I, F),
+  spawn(fun() -> proxy(Service, Client) end),
+  proxy(Client, Service).
 
 parse_request_line(Client) ->
   {ok, Line} = gen_tcp:recv(Client, 0),
-  {Name, Version} = parse(Line),
-  {{Url, Port}, Thread} = elsa_kernel_controller:find_service(Name, Version),
-  {ok, Service} = gen_tcp:connect(Url, Port, [binary, {packet, line}]),
-  gen_tcp:send(Client, Line),
+  {Name, Version, NewLine} = parse(Line),
+  {{Address, Port}, Thread} = elsa_kernel_controller:find_service(Name, Version),
+  lager:info("about to connect to ~p", [Address]),
+  {ok, Service} = gen_tcp:connect(Address, Port, [binary, {packet, raw}, {active, false}, {active, false}]),
+  gen_tcp:send(Service, NewLine),
+  inet:setopts(Client, [{packet, raw}]),
   {Service, Name, Version, Thread}.
 
-parse_headers(Client, Service, ContentLength) ->
-  case gen_tcp:recv(Client, 0) of
-    {ok, Line = <<"\r\n">>} ->
-      gen_tcp:send(Service, Line),
-      inet:setopts(Client, [{packet, raw}]);
-    {ok, Line = <<"Content-Length: ", N/binary>>} ->
-      gen_tcp:send(Service, Line),
-      parse_headers(Client, Service, content_length(N));
-    {ok, Line} ->
-      gen_tcp:send(Service, Line),
-      parse_headers(Client, Service, ContentLength);
-    {error, closed} ->
-      lager:error("Connection dropped")
-  end,
-  ContentLength.
-
-parse_body(Client, Service, ContentLength, ReadSoFar) ->
- if ReadSoFar == ContentLength ->
-      gen_tcp:close(Client);
-    true ->
-      case gen_tcp:recv(Client, 0, 100) of
-        {ok, Bin} ->
-          gen_tcp:send(Service, Bin),
-          parse_body(Client, Service, ContentLength, ReadSoFar + size(Bin));
-        {error, closed} ->
-          lager:info("Connection dropped")
-      end
- end.
-
-content_length(Val) ->
-  [Num, _] = binary:split(Val, <<"\r">>),
-  binary_to_integer(Num).
+proxy(Source, Destination) ->
+  case gen_tcp:recv(Source, 0) of
+     {ok, Bin} ->
+       lager:info("Bin: ~p", [Bin]),
+       gen_tcp:send(Destination, Bin),
+       proxy(Source, Destination);
+     {error, closed} ->
+       lager:info("Connection closed")
+   end.
 
 parse(RequestLine) ->
   [Verb, Rest] = binary:split(RequestLine, <<" ">>),
+  lager:info("Verb and Rest: ~p : ~p", [Verb, Rest]),
   [_, Name, Version | Rest2] = binary:split(Rest, <<"/">>, [global]),
-  URL = [Verb,<<" /">>,Rest2],
-  lager:info("Rest: ~p", [URL]),
-  {Name, Version}.
+  lager:info("Name, Version, and Rest: ~p : ~p : ~p", [Name, Version, Rest2]),
+  Cap = concat_bin(Rest2, <<"">>),
+  NewLine = <<Verb/binary, <<" ">>/binary, Cap/binary>>,
+  lager:info("Rest: ~p", [NewLine]),
+  {Name, Version, NewLine}.
+
+concat_bin([], Bin) -> Bin;
+concat_bin([Item | List], Bin) ->
+  concat_bin(List, <<Bin/binary, <<"/">>/binary, Item/binary>>).

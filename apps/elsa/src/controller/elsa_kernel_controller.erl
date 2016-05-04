@@ -30,5 +30,5 @@ resource_missing(N, V, Request) ->
   ]), cowboy_req:reply(404, Req).
 
 split_url(Loc) ->
-  [Url, Port] = binary:split(Loc, <<":">>),
-  {binary_to_list(Url), binary_to_integer(Port)}.
+  [Address, Port] = binary:split(Loc, <<":">>, [global]),
+  {binary_to_list(Address), binary_to_integer(Port)}.
